@@ -1,0 +1,19 @@
+{
+  "name": "pi-podcast",
+  "version": "0.1.0",
+  "description": "Pocket Casts podcast player for pi — browse subscriptions, search, and play episodes in mpv.",
+  "author": "Lorenzo Strambi <mail@lukather.net>",
+  "license": "MIT",
+  "keywords": ["pi-package", "podcast", "pocket-casts", "mpv"],
+  "type": "module",
+  "pi": {
+    "extensions": ["./podcast.ts"]
+  },
+  "dependencies": {
+    "@napi-rs/keyring": "^1.1.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
