@@ -4,6 +4,23 @@ A Pocket Casts podcast player that lives inside [pi](https://pi.dev).
 
 Browse your subscriptions, search the catalog, pick up where you left off, and play episodes in [mpv](https://mpv.io) — all from the `/podcast` command.
 
+## Requirements
+
+Before installing, make sure you have these:
+
+- **[Pocket Casts](https://pocketcasts.com) account with a Plus subscription.** This extension talks to the Pocket Casts web API, which is gated behind Plus. Free accounts will fail at login.
+- **[mpv](https://mpv.io) media player** on your `PATH`. Episodes are streamed straight into mpv via IPC.
+  ```bash
+  # Windows
+  winget install mpv
+
+  # macOS
+  brew install mpv
+
+  # Linux
+  sudo apt install mpv   # or your distro's equivalent
+  ```
+
 ## Install
 
 ```bash
@@ -16,22 +33,9 @@ Or, for a quick test without installing:
 pi -e git:github.com/Lukather/pi-podcast
 ```
 
-You'll also need `mpv` on your `PATH`:
-
-```bash
-# Windows
-winget install mpv
-
-# macOS
-brew install mpv
-
-# Linux
-sudo apt install mpv   # or your distro's equivalent
-```
-
 ## Setup
 
-1. Sign in to Pocket Casts Plus (this extension uses the Pocket Casts web API, which requires a Plus subscription):
+1. Sign in with your Pocket Casts email and password:
 
    ```
    /podcast login
