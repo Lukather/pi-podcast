@@ -2,6 +2,9 @@
 
 A Pocket Casts podcast player that lives inside [pi](https://pi.dev).
 
+<img width="601" height="405" alt="image" src="https://github.com/user-attachments/assets/2047529d-cb32-4c11-94a0-f602f0f2b0f3" />
+
+
 Browse your subscriptions, search the catalog, pick up where you left off, and play episodes in [mpv](https://mpv.io) — all from the `/podcast` command.
 
 ## Requirements
