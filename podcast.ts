@@ -36,6 +36,12 @@ const SYNC_INTERVAL_MS = 15000;
 // ponytail: Windows mpv builds often lack TCP IPC, use named pipes
 const IS_WINDOWS = process.platform === "win32";
 
+// ponytail: free-path UI copy. Logged-out users see Plus-only entries
+// labelled, and a single shared guard that names the working public lists.
+const NEEDS_PLUS = "Needs Pocket Casts Plus. Log in with /podcast login — or browse Trending, Popular and Featured, which work without an account.";
+const LOGIN_PLUS_CLAUSE = " — a Pocket Casts Plus account is required. Trending, Popular and Featured work without one.";
+const NOW_SYNC_SUFFIX = " — progress not syncing (not logged in)";
+
 // ── types ───────────────────────────────────────────────────────────────────
 interface StoredTokens {
   accessToken: string;
@@ -846,12 +852,12 @@ async function loginFlow(ctx: ExtensionContext): Promise<void> {
     await pc.login(email, password);
     ctx.ui.notify(`Logged in as ${pc.email}`, "success");
   } catch (e: any) {
-    ctx.ui.notify(`Login failed: ${e.message}`, "error");
+    ctx.ui.notify(`Login failed: ${e.message}${LOGIN_PLUS_CLAUSE}`, "error");
   }
 }
 
 async function subsFlow(ctx: ExtensionContext): Promise<void> {
-  if (!pc?.isAuthed) { ctx.ui.notify("Not logged in. Run /podcast login.", "warning"); return; }
+  if (!pc?.isAuthed) { ctx.ui.notify(NEEDS_PLUS, "warning"); return; }
   let podcasts: Podcast[];
   try {
     const data = await pc.getSubscriptions();
@@ -885,7 +891,7 @@ async function subsFlow(ctx: ExtensionContext): Promise<void> {
 }
 
 async function newReleasesFlow(ctx: ExtensionContext): Promise<void> {
-  if (!pc?.isAuthed) { ctx.ui.notify("Not logged in. Run /podcast login.", "warning"); return; }
+  if (!pc?.isAuthed) { ctx.ui.notify(NEEDS_PLUS, "warning"); return; }
   let data: { episodes: Episode[] };
   try {
     data = await pc.getNewReleases();
@@ -903,7 +909,7 @@ async function newReleasesFlow(ctx: ExtensionContext): Promise<void> {
 }
 
 async function inProgressFlow(ctx: ExtensionContext): Promise<void> {
-  if (!pc?.isAuthed) { ctx.ui.notify("Not logged in. Run /podcast login.", "warning"); return; }
+  if (!pc?.isAuthed) { ctx.ui.notify(NEEDS_PLUS, "warning"); return; }
   let data: { episodes: Episode[] };
   try {
     data = await pc.getInProgress();
@@ -925,7 +931,7 @@ async function inProgressFlow(ctx: ExtensionContext): Promise<void> {
 }
 
 async function searchFlow(ctx: ExtensionContext, query?: string): Promise<void> {
-  if (!pc?.isAuthed) { ctx.ui.notify("Not logged in. Run /podcast login.", "warning"); return; }
+  if (!pc?.isAuthed) { ctx.ui.notify(NEEDS_PLUS, "warning"); return; }
   const q = query || (await ctx.ui.input("Search", "e.g. Lex Fridman, 99% Invisible, This American Life"));
   if (!q) return;
   let data: { podcasts: Podcast[] };
@@ -1000,11 +1006,20 @@ async function listFlow(
   if (episode) await play(episode, ctx);
 }
 
+// ponytail: shared "now playing" line used by both the menu's NOW case and
+// the /podcast now subcommand. Appends the sync suffix when not logged in,
+// since position sync is the only thing that breaks without an account.
+function nowPlayingLine(): string {
+  if (!nowPlaying) return "Nothing playing.";
+  const base = `Now playing: ${labelEpisode(nowPlaying)} [${formatTime(currentPosition)}/${formatTime(nowPlaying.duration)}]`;
+  return pc?.isAuthed ? base : `${base}${NOW_SYNC_SUFFIX}`;
+}
+
 async function mainMenu(ctx: ExtensionContext): Promise<void> {
-  const SUBSCRIPTIONS = "📚 Subscriptions";
-  const NEW = "🆕 New releases";
-  const CONTINUE = "⏯  Continue listening";
-  const SEARCH = "🔎 Search";
+  const SUBSCRIPTIONS = pc?.isAuthed ? "📚 Subscriptions" : "📚 Subscriptions (Plus)";
+  const NEW = pc?.isAuthed ? "🆕 New releases" : "🆕 New releases (Plus)";
+  const CONTINUE = pc?.isAuthed ? "⏯  Continue listening" : "⏯  Continue listening (Plus)";
+  const SEARCH = pc?.isAuthed ? "🔎 Search" : "🔎 Search (Plus)";
   const TRENDING = "📈 Trending";
   const POPULAR = "🔥 Popular";
   const FEATURED = "⭐ Featured";
@@ -1033,12 +1048,7 @@ async function mainMenu(ctx: ExtensionContext): Promise<void> {
     case POPULAR: await listFlow("popular", "Popular", ctx); break;
     case FEATURED: await listFlow("featured", "Featured", ctx); break;
     case NOW:
-      ctx.ui.notify(
-        nowPlaying
-          ? `Now playing: ${labelEpisode(nowPlaying)} [${formatTime(currentPosition)}/${formatTime(nowPlaying.duration)}]`
-          : "Nothing playing.",
-        "info",
-      );
+      ctx.ui.notify(nowPlayingLine(), "info");
       break;
     case STOP:
       flushPosition(2); // stopping early is not "played"
@@ -1117,16 +1127,14 @@ export default function (pi: ExtensionAPI) {
           await listFlow("featured", "Featured", ctx);
           break;
 
-        case "now":
-          if (nowPlaying) {
-            ctx.ui.notify(
-              `Now playing: ${labelEpisode(nowPlaying)} [${formatTime(currentPosition)}/${formatTime(nowPlaying.duration)}] ${isPaused ? "(paused)" : ""}`,
-              "info",
-            );
-          } else {
-            ctx.ui.notify("Nothing playing.", "info");
-          }
+        case "now": {
+          const line = nowPlayingLine();
+          ctx.ui.notify(
+            nowPlaying && isPaused ? `${line} (paused)` : line,
+            "info",
+          );
           break;
+        }
 
         case "pause":
           if (!nowPlaying) { ctx.ui.notify("Nothing playing.", "info"); break; }
