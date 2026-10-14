@@ -26,6 +26,9 @@ jobs:
         with:
           node-version: 22.x
 
+      - name: Show Node version
+        run: node --version
+
       - name: Install dependencies
         run: npm install
 
