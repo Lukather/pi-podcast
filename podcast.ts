@@ -17,7 +17,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { spawn, execSync, ChildProcess } from "child_process";
+import { spawn, execFileSync, ChildProcess } from "child_process";
 import * as net from "net";
 import * as path from "path";
 import * as fs from "fs";
@@ -254,14 +254,6 @@ class PocketCastsClient {
     return this.authedPost("/user/in_progress");
   }
 
-  async getStarred(): Promise<{ episodes: Episode[] }> {
-    return this.authedPost("/user/starred");
-  }
-
-  async getHistory(): Promise<{ episodes: Episode[] }> {
-    return this.authedPost("/user/history");
-  }
-
   async getEpisode(uuid: string): Promise<Episode> {
     return this.authedPost("/user/episode", { uuid });
   }
@@ -368,13 +360,21 @@ let mpvIpcAddr = ""; // TCP port or named-pipe path
 let nowPlaying: Episode | null = null;
 let isPaused = false;
 let currentPosition = 0; // seconds, updated by IPC poll
+let endReason: string | null = null; // mpv's end-file reason for the current episode
 let syncTimer: ReturnType<typeof setInterval> | null = null;
 let positionTimer: ReturnType<typeof setInterval> | null = null;
 
-// ponytail: scan PATH + common Windows install locations for mpv
+// ponytail: scan PATH + common Windows install locations for mpv, then cache
+// a hit — play() used to shell out on every single episode
+let mpvBin: string | null = null;
 function findMpv(): string | null {
+  if (mpvBin) return mpvBin;
   // Check PATH first
-  try { execSync("mpv --version", { stdio: "ignore" }); return "mpv"; } catch {}
+  try {
+    execFileSync("mpv", ["--version"], { stdio: "ignore", timeout: 2000 });
+    mpvBin = "mpv";
+    return mpvBin;
+  } catch {}
   // Common install locations (no PATH needed)
   const localAppData = process.env.LOCALAPPDATA ?? "";
   const candidates = [
@@ -386,17 +386,17 @@ function findMpv(): string | null {
     path.join(localAppData, "Microsoft", "WinGet", "Packages", "mpv-player.mpv-CI.MSVC_8wekyb3d8bbwe", "mpv.exe"),
   ];
   for (const c of candidates) {
-    if (fs.existsSync(c)) return c;
+    if (fs.existsSync(c)) {
+      mpvBin = c;
+      return mpvBin;
+    }
   }
   return null;
 }
 
-// ponytail: generate a unique IPC address per session
+// ponytail: unique named pipe per session (Windows only — Unix uses TCP)
 function ipcAddr(): string {
-  if (IS_WINDOWS) {
-    return `\\\\.\\pipe\\mpv-podcast-${process.pid}-${Date.now()}`;
-  }
-  return `tcp://127.0.0.1:0`; // port 0 lets findFreePort pick
+  return `\\\\.\\pipe\\mpv-podcast-${process.pid}-${Date.now()}`;
 }
 
 function findFreePort(): Promise<number> {
@@ -418,15 +418,6 @@ function mpvIpc(command: any): Promise<any> {
     // mpv sends back a line per command; we'll handle responses in the read loop
     resolve(undefined); // fire-and-forget for most commands
   });
-}
-
-async function mpvGetProperty(prop: string): Promise<any> {
-  if (!mpvSocket || mpvSocket.destroyed) return null;
-  const payload = JSON.stringify({ command: ["get_property", prop] }) + "\n";
-  mpvSocket.write(payload);
-  // Response is read asynchronously in the read loop; we use a simple
-  // position-poll approach instead of per-request promises.
-  return null; // position polled via IPC read loop below
 }
 
 function labelEpisode(ep: Episode): string {
@@ -455,6 +446,16 @@ function progressBar(pct: number, width: number): string {
   const w = Math.max(1, width);
   const filled = Math.round((pct / 100) * w);
   return "█".repeat(filled) + "░".repeat(w - filled);
+}
+
+// ponytail: only a real end-of-file counts as finished. Stopping early (or
+// closing pi) has to stay "in progress", or the episode vanishes from
+// Continue listening without ever being heard.
+function finishStatus(): 2 | 3 {
+  if (endReason === "eof") return 3;
+  const dur = nowPlaying?.duration ?? 0;
+  if (dur > 0 && currentPosition >= dur - 5) return 3;
+  return 2;
 }
 
 // sync progress back to Pocket Casts
@@ -509,7 +510,7 @@ async function play(episode: Episode, ctx: ExtensionContext, startPos?: number):
     "--quiet",
     "--no-terminal",
     `--input-ipc-server=${mpvIpcAddr}`,
-    `--force-media-title=${Buffer.from(labelEpisode(episode)).toString("utf8")}`,
+    `--force-media-title=${labelEpisode(episode)}`,
     "--pause", // start paused to connect IPC first
   ];
   if (startPos && startPos > 0) {
@@ -523,6 +524,7 @@ async function play(episode: Episode, ctx: ExtensionContext, startPos?: number):
   nowPlaying = episode;
   isPaused = true;
   currentPosition = startPos ?? 0;
+  endReason = null;
 
   player = spawn(mpvPath, args, { stdio: "ignore", detached: false });
 
@@ -532,9 +534,9 @@ async function play(episode: Episode, ctx: ExtensionContext, startPos?: number):
     clearWidget(ctx);
   });
 
-  player.on("exit", (code) => {
-    // Flush position on natural end (played through)
-    flushPosition(3);
+  player.on("exit", () => {
+    // Flush position; only a real EOF marks the episode played
+    flushPosition(finishStatus());
     player = null;
     mpvSocket = null;
     clearWidget(ctx);
@@ -547,17 +549,37 @@ async function play(episode: Episode, ctx: ExtensionContext, startPos?: number):
   mpvSocket = new net.Socket();
   let ipcBuffer = "";
 
-  await new Promise<void>((resolve, reject) => {
-    if (IS_WINDOWS) {
-      // named pipe — connect with path, not port
-      (mpvSocket! as any).connect(mpvIpcAddr, () => resolve());
-    } else {
-      const port = parseInt(mpvIpcAddr.split(":").pop()!, 10);
-      mpvSocket!.connect(port, "127.0.0.1", () => resolve());
-    }
-    mpvSocket!.on("error", reject);
-    setTimeout(() => reject(new Error("mpv IPC connection timeout")), 3000);
-  });
+  // ponytail: mpv can fail before the IPC socket accepts (bad stream URL,
+  // missing codec). Clean up the process and the state it left behind
+  // instead of reporting a phantom "now playing" episode.
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("mpv IPC connection timeout")),
+        3000,
+      );
+      const connected = () => { clearTimeout(timer); resolve(); };
+      if (IS_WINDOWS) {
+        // named pipe — connect with path, not port
+        (mpvSocket! as any).connect(mpvIpcAddr, connected);
+      } else {
+        const port = parseInt(mpvIpcAddr.split(":").pop()!, 10);
+        mpvSocket!.connect(port, "127.0.0.1", connected);
+      }
+      // listener stays attached: later socket errors stay handled
+      mpvSocket!.on("error", (err) => { clearTimeout(timer); reject(err); });
+    });
+  } catch (e: any) {
+    mpvSocket?.destroy();
+    mpvSocket = null;
+    nowPlaying = null;
+    const dead = player;
+    player = null;
+    try { dead?.kill("SIGKILL"); } catch {}
+    clearWidget(ctx);
+    ctx.ui.notify(`mpv IPC failed: ${e.message}`, "error");
+    return false;
+  }
 
   let fileLoadedResolver!: () => void;
   const fileLoadedPromise = new Promise<void>((resolve) => {
@@ -575,13 +597,14 @@ async function play(episode: Episode, ctx: ExtensionContext, startPos?: number):
         const msg = JSON.parse(line);
         if (msg?.event === "property-change" && msg?.name === "time-pos") {
           currentPosition = msg.data ?? 0;
-          widgetComponent?.invalidate();
+          repaintWidget();
         }
         if (msg?.event === "file-loaded") {
           fileLoadedResolver();
         }
         if (msg?.event === "end-file") {
-          // Natural end of file
+          // "eof" on a real finish, "quit"/"stop"/"error" otherwise
+          endReason = msg.reason ?? null;
         }
         if (msg?.event === "pause") {
           isPaused = true;
@@ -610,6 +633,14 @@ async function play(episode: Episode, ctx: ExtensionContext, startPos?: number):
     fileLoadedPromise,
     new Promise<void>((resolve) => setTimeout(resolve, 10000)),
   ]);
+
+  // mpv can also die between connect and unpause (bad stream, missing codec)
+  if (!mpvSocket || mpvSocket.destroyed || !player) {
+    ctx.ui.notify("mpv exited before playback started.", "error");
+    nowPlaying = null;
+    clearWidget(ctx);
+    return false;
+  }
 
   mpvSocket.write(JSON.stringify({ command: ["set_property", "pause", false] }) + "\n");
   isPaused = false;
@@ -653,15 +684,16 @@ function stop() {
     mpvSocket = null;
   }
 
-  if (player) {
-    player.removeAllListeners("exit");
-    try { player.kill("SIGTERM"); } catch {}
+  // ponytail: capture the process this timer is armed for. Reading the
+  // module-level `player` here killed the *next* episode's mpv, because
+  // play() calls stop() and re-spawns straight away.
+  const dying = player;
+  if (dying) {
+    dying.removeAllListeners("exit");
+    try { dying.kill("SIGTERM"); } catch {}
     // On Windows, SIGTERM -> SIGKILL after timeout; give it a moment
     setTimeout(() => {
-      if (player) {
-        try { player.kill("SIGKILL"); } catch {}
-        player = null;
-      }
+      try { dying.kill("SIGKILL"); } catch {}
     }, 1000);
     player = null;
   }
@@ -688,24 +720,43 @@ async function resumePlayback(ctx: ExtensionContext): Promise<void> {
   updateWidget(ctx);
 }
 
-async function seekPlayback(seconds: number, ctx: ExtensionContext): Promise<void> {
+// ponytail: two intents, two commands — /podcast seek is absolute (as the
+// README says), ff/rew are relative skips.
+async function seekRelative(seconds: number): Promise<void> {
   if (!nowPlaying) return;
   try {
     await mpvIpc(["seek", seconds, "relative"]);
   } catch { /* ignore */ }
 }
 
-async function skipForward(ctx: ExtensionContext): Promise<void> {
-  await seekPlayback(30, ctx);
+async function seekAbsolute(seconds: number): Promise<void> {
+  if (!nowPlaying) return;
+  try {
+    await mpvIpc(["seek", seconds, "absolute"]);
+  } catch { /* ignore */ }
 }
 
-async function skipBack(ctx: ExtensionContext): Promise<void> {
-  await seekPlayback(-15, ctx);
+async function skipForward(): Promise<void> {
+  await seekRelative(30);
+}
+
+async function skipBack(): Promise<void> {
+  await seekRelative(-15);
 }
 
 // ── widget ──────────────────────────────────────────────────────────────────
-// ponytail: keep a handle to the live widget so position events can invalidate it
-let widgetComponent: { invalidate: () => void } | null = null;
+// ponytail: keep the widget's TUI handle so position events can repaint it.
+// invalidate() only drops cached render state — a redraw needs requestRender().
+let widgetTui: { requestRender: (force?: boolean) => void } | null = null;
+let lastPaintAt = 0;
+
+function repaintWidget(): void {
+  // mpv emits time-pos roughly once a second; cap redraws in case a build is chatty
+  const now = Date.now();
+  if (now - lastPaintAt < 500) return;
+  lastPaintAt = now;
+  widgetTui?.requestRender();
+}
 
 function widgetText(ep: Episode, renderWidth: number): string {
   const pctVal = listeningPct(currentPosition, ep.duration);
@@ -727,8 +778,9 @@ function showWidget(ctx: ExtensionContext, ep: Episode) {
   if (!ctx.hasUI) return;
   ctx.ui.setWidget(
     WIDGET_KEY,
-    (_tui: any, theme: any) => {
-      const component = {
+    (tui: any, theme: any) => {
+      widgetTui = tui;
+      return {
         render: (width: number) => {
           // Fresh Text each render — currentPosition is read from module state,
           // so every redraw reflects the latest position.
@@ -736,8 +788,6 @@ function showWidget(ctx: ExtensionContext, ep: Episode) {
         },
         invalidate: () => {},
       };
-      widgetComponent = component;
-      return component;
     },
     { placement: "belowEditor" },
   );
@@ -749,7 +799,7 @@ function updateWidget(ctx: ExtensionContext) {
 }
 
 function clearWidget(ctx: ExtensionContext) {
-  widgetComponent = null;
+  widgetTui = null;
   if (!ctx.hasUI) return;
   ctx.ui.setWidget(WIDGET_KEY, undefined);
 }
@@ -766,7 +816,17 @@ async function pickFromList<T>(
     ctx.ui.notify("Nothing to show.", "info");
     return null;
   }
-  const labels = items.map(labelFn);
+  // ponytail: ctx.ui.select() only reports the chosen label, so repeated
+  // titles (podcasts reuse episode names) need collision-free suffixes
+  const used = new Set<string>();
+  const labels = items.map((item) => {
+    const base = labelFn(item);
+    let label = base;
+    let n = 1;
+    while (used.has(label)) label = `${base} (${++n})`;
+    used.add(label);
+    return label;
+  });
   const choice = await ctx.ui.select(title, labels);
   if (!choice) return null;
   return items[labels.indexOf(choice)] ?? null;
@@ -981,7 +1041,7 @@ async function mainMenu(ctx: ExtensionContext): Promise<void> {
       );
       break;
     case STOP:
-      flushPosition(3);
+      flushPosition(2); // stopping early is not "played"
       stop();
       clearWidget(ctx);
       ctx.ui.notify("Podcast stopped.", "info");
@@ -1037,7 +1097,6 @@ export default function (pi: ExtensionAPI) {
           break;
 
         case "continue":
-        case "resume":
         case "inprogress":
           await inProgressFlow(ctx);
           break;
@@ -1085,7 +1144,7 @@ export default function (pi: ExtensionAPI) {
           break;
 
         case "stop":
-          await flushPosition(3);
+          await flushPosition(2); // stopping early is not "played"
           stop();
           clearWidget(ctx);
           ctx.ui.notify("Podcast stopped.", "info");
@@ -1093,13 +1152,13 @@ export default function (pi: ExtensionAPI) {
 
         case "ff":
         case "forward":
-          await skipForward(ctx);
+          await skipForward();
           ctx.ui.notify(`Seeked +30s → ${formatTime(currentPosition)}.`, "info");
           break;
 
         case "rew":
         case "rewind":
-          await skipBack(ctx);
+          await skipBack();
           ctx.ui.notify(`Seeked -15s → ${formatTime(currentPosition)}.`, "info");
           break;
 
@@ -1109,8 +1168,8 @@ export default function (pi: ExtensionAPI) {
             ctx.ui.notify("Usage: /podcast seek <seconds>", "warning");
             break;
           }
-          await seekPlayback(sec, ctx);
-          ctx.ui.notify(`Seeked by ${sec}s → ${formatTime(currentPosition)}.`, "info");
+          await seekAbsolute(sec);
+          ctx.ui.notify(`Seeking to ${formatTime(sec)}.`, "info");
           break;
 
         case "position":
@@ -1138,7 +1197,8 @@ export default function (pi: ExtensionAPI) {
   // ── cleanup ──
   pi.on("session_shutdown", async (_event: any, ctx: ExtensionContext) => {
     if (nowPlaying) {
-      await flushPosition(3);
+      // ponytail: closing pi keeps the episode resumable
+      await flushPosition(2);
     }
     stop();
     clearWidget(ctx);
