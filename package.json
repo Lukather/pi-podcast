@@ -13,6 +13,22 @@
   "pi": {
     "extensions": ["./podcast.ts"]
   },
+  "files": [
+    "podcast.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lukather/pi-podcast.git"
+  },
+  "homepage": "https://github.com/Lukather/pi-podcast#readme",
+  "bugs": {
+    "url": "https://github.com/Lukather/pi-podcast/issues"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
   "dependencies": {
     "@napi-rs/keyring": "^1.1.0"
   },
