@@ -262,3 +262,104 @@ test("episode parsing: show_notes responses are mapped into the Episode shape", 
     "Episode 2  [40:00]",
   ]);
 });
+
+// ── keyring fallback (#15) ──────────────────────────────────────────────────
+//
+// Two scenarios must round-trip tokens through the file:
+//   - keyring "missing" (constructor throws): simulates a system with no
+//     credential manager or a keyring that's been uninstalled.
+//   - keyring "broken" (constructor OK, methods throw): simulates a locked
+//     store on @napi-rs/keyring 2.x — the kind of failure the ticket
+//     describes that the pre-fix code surfaced instead of catching.
+
+import { saveTokens, loadTokens } from "../podcast.ts";
+import * as fs from "node:fs";
+import * as path from "node:path";
+
+const KEYRING_ENV = "PI_PODCAST_KEYRING_STUB";
+
+function withKeyringMode(mode: "missing" | "broken", fn: () => Promise<void>) {
+  return async () => {
+    const prev = process.env[KEYRING_ENV];
+    process.env[KEYRING_ENV] = mode;
+    try {
+      await fn();
+    } finally {
+      if (prev === undefined) delete process.env[KEYRING_ENV];
+      else process.env[KEYRING_ENV] = prev;
+    }
+  };
+}
+
+function tokenFile() {
+  return path.join(process.env.HOME!, ".config", "pi", "podcast.json");
+}
+
+test("keyring missing: login still writes tokens to the file fallback", withKeyringMode("missing", async () => {
+  origFetch = globalThis.fetch;
+  globalThis.fetch = makeFetch([
+    {
+      match: "/user/login_pocket_casts",
+      respond: () => jsonResponse({ accessToken: fakeJwt("missing@example.com"), refreshToken: "ref", expiresIn: 3600 }),
+    },
+  ]) as any;
+
+  const ctx = makeCtx({ inputs: ["missing@example.com", "p"] });
+  await handler!("login", ctx);
+
+  // Login notify still fires — saveTokens caught the constructor throw.
+  assert.equal(ctx.state.notifications.at(-1)?.msg, "Logged in as missing@example.com");
+  // And the file fallback now holds the tokens.
+  assert.ok(fs.existsSync(tokenFile()), `expected token file at ${tokenFile()}`);
+}));
+
+test("keyring missing: loadTokens falls through to the file when getPassword throws (constructor)", withKeyringMode("missing", async () => {
+  // Save tokens directly so the file has them; default-mode constructor
+  // would otherwise block the file write.
+  process.env[KEYRING_ENV] = "missing";
+  const saved = { accessToken: "file-tok", refreshToken: "file-ref", expiresAt: Date.now() + 3600000 };
+  await saveTokens(saved);
+  // Sanity: the file actually has them.
+  assert.ok(fs.existsSync(tokenFile()));
+  const onDisk = JSON.parse(fs.readFileSync(tokenFile(), "utf8"));
+  assert.equal(onDisk.accessToken, "file-tok");
+
+  // loadTokens in missing mode: Entry constructor throws. With the fix,
+  // the catch falls through to the file read.
+  const loaded = await loadTokens();
+  assert.ok(loaded, "loadTokens must return the file tokens, not null");
+  assert.equal(loaded!.accessToken, "file-tok");
+}));
+
+test("keyring broken: login still writes tokens to the file fallback", withKeyringMode("broken", async () => {
+  origFetch = globalThis.fetch;
+  globalThis.fetch = makeFetch([
+    {
+      match: "/user/login_pocket_casts",
+      respond: () => jsonResponse({ accessToken: fakeJwt("broken@example.com"), refreshToken: "ref", expiresIn: 3600 }),
+    },
+  ]) as any;
+
+  const ctx = makeCtx({ inputs: ["broken@example.com", "p"] });
+  await handler!("login", ctx);
+
+  // Login notify still fires — saveTokens caught the setPassword throw.
+  assert.equal(ctx.state.notifications.at(-1)?.msg, "Logged in as broken@example.com");
+  assert.equal(ctx.state.notifications.at(-1)?.severity, "info");
+  // And the file fallback now holds the tokens.
+  assert.ok(fs.existsSync(tokenFile()), `expected token file at ${tokenFile()}`);
+  const onDisk = JSON.parse(fs.readFileSync(tokenFile(), "utf8"));
+  assert.equal(onDisk.accessToken, fakeJwt("broken@example.com"));
+}));
+
+test("keyring broken: loadTokens falls through to the file when getPassword throws", withKeyringMode("broken", async () => {
+  // Save tokens directly so the file has them, then verify loadTokens
+  // reads them despite the broken-mode getPassword throw.
+  const saved = { accessToken: "file-tok-2", refreshToken: "file-ref-2", expiresAt: Date.now() + 3600000 };
+  await saveTokens(saved);
+  assert.ok(fs.existsSync(tokenFile()));
+
+  const loaded = await loadTokens();
+  assert.ok(loaded, "loadTokens must return the file tokens, not null");
+  assert.equal(loaded!.accessToken, "file-tok-2");
+}));

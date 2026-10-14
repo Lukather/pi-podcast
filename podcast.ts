@@ -92,25 +92,47 @@ async function keyringAvailable(): Promise<boolean> {
 }
 
 async function saveTokens(t: StoredTokens): Promise<void> {
-  if (await keyringAvailable()) {
-    const { Entry } = await import("@napi-rs/keyring");
-    new Entry(SERVICE, ACCOUNT).setPassword(JSON.stringify(t));
-  } else {
-    // ponytail: file fallback for systems without credential manager
+  // ponytail: file fallback for systems without a credential manager
+  // (headless Linux, WSL, CI runners). Also the documented fallback
+  // when the keyring exists but the write fails — e.g., a locked
+  // store on @napi-rs/keyring 2.x throws by design. /podcast login
+  // must not surface that throw, otherwise the user can't log in at
+  // all on the affected machine.
+  const writeFile = () => {
     const filePath = TOKEN_FILE();
     const dir = path.dirname(filePath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(filePath, JSON.stringify(t), { mode: 0o600 });
+  };
+  if (await keyringAvailable()) {
+    try {
+      const { Entry } = await import("@napi-rs/keyring");
+      new Entry(SERVICE, ACCOUNT).setPassword(JSON.stringify(t));
+      return;
+    } catch {
+      // ponytail: keyring write threw (locked store on 2.x, broken
+      // provider, anything). Fall through to the file so the user
+      // isn't locked out of their own machine.
+    }
   }
+  writeFile();
 }
 
 async function loadTokens(): Promise<StoredTokens | null> {
+  // ponytail: the keyring branch was the only thing checked — a keyring
+  // that returns nothing or throws was treated as \"no tokens\", so a
+  // previous session's file tokens were invisible even though the
+  // README promises the file is the fallback. Try the file after any
+  // keyring failure, not only when the keyring itself is unavailable.
   if (await keyringAvailable()) {
     try {
       const { Entry } = await import("@napi-rs/keyring");
       const raw = new Entry(SERVICE, ACCOUNT).getPassword();
-      return raw ? JSON.parse(raw) : null;
-    } catch { return null; }
+      if (raw) return JSON.parse(raw);
+    } catch {
+      // ponytail: keyring read threw — fall through to the file path
+      // so the previous session's tokens aren't lost.
+    }
   }
   try {
     const raw = fs.readFileSync(TOKEN_FILE(), "utf8");
@@ -1223,4 +1245,4 @@ export default function (pi: ExtensionAPI) {
 // Behavior of these in production is unchanged — they are pure functions
 // here, but the harness can also drive widgetText/finishStatus directly
 // after the widgetText/finishStatus refactor that took module state as args.
-export { formatTime, listeningPct, progressBar, widgetText, pickFromList, finishStatus };
+export { formatTime, listeningPct, progressBar, widgetText, pickFromList, finishStatus, saveTokens, loadTokens };

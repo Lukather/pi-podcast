@@ -7,7 +7,7 @@
   "keywords": ["pi-package", "podcast", "pocket-casts", "mpv"],
   "type": "module",
   "scripts": {
-    "test": "node --import ./tests/harness.ts --test --experimental-test-isolation=none tests/*.test.ts",
+    "test": "node --import ./tests/harness.ts --test tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "pi": {
