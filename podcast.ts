@@ -853,7 +853,7 @@ async function loginFlow(ctx: ExtensionContext): Promise<void> {
   try {
     pc = new PocketCastsClient();
     await pc.login(email, password);
-    ctx.ui.notify(`Logged in as ${pc.email}`, "success");
+    ctx.ui.notify(`Logged in as ${pc.email}`, "info");
   } catch (e: any) {
     ctx.ui.notify(`Login failed: ${e.message}${LOGIN_PLUS_CLAUSE}`, "error");
   }

@@ -9,6 +9,8 @@ import "./harness.ts";
 import { test, before, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
 let handler: ((args: string, ctx: any) => Promise<void>) | undefined;
 
 before(async () => {
@@ -17,7 +19,7 @@ before(async () => {
       handler = def.handler;
     },
     on(_event: string, _fn: any) {},
-  };
+  } as unknown as ExtensionAPI;
   const mod = await import("../podcast.ts");
   mod.default(fakePi);
   if (!handler) throw new Error("handler not captured");
@@ -102,7 +104,7 @@ test("login: success stores tokens and logs out cleanly", async () => {
   await handler!("login", ctx);
 
   assert.equal(ctx.state.notifications.at(-1)?.msg, "Logged in as user@example.com");
-  assert.equal(ctx.state.notifications.at(-1)?.severity, "success");
+  assert.equal(ctx.state.notifications.at(-1)?.severity, "info");
 
   // After login, logout must say "Logged out." — if login hadn't actually
   // set pc.tokens, logout would say "Not logged in." instead.

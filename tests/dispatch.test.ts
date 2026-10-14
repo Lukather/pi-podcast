@@ -13,6 +13,8 @@ import "./harness.ts";
 import { test, before, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
 import { pickFromList } from "../podcast.ts";
 
 let handler: ((args: string, ctx: any) => Promise<void>) | undefined;
@@ -32,7 +34,7 @@ before(async () => {
       handler = def.handler;
     },
     on(_event: string, _fn: any) {},
-  };
+  } as unknown as ExtensionAPI;
   const mod = await import("../podcast.ts");
   mod.default(fakePi);
   if (!handler) throw new Error("handler not captured");
@@ -43,6 +45,7 @@ before(async () => {
 // Without this, the file-based token store re-loads via pc.init() and
 // pc.isAuthed flips to true between before() and the test body.
 beforeEach(async () => {
+  if (!handler) throw new Error("handler not captured");
   await handler("logout", makeCtx());
 });
 
