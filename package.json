@@ -6,6 +6,9 @@
   "license": "MIT",
   "keywords": ["pi-package", "podcast", "pocket-casts", "mpv"],
   "type": "module",
+  "scripts": {
+    "test": "node --import ./tests/harness.ts --test --test-isolation=none tests/*.test.ts"
+  },
   "pi": {
     "extensions": ["./podcast.ts"]
   },

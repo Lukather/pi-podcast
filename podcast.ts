@@ -457,10 +457,11 @@ function progressBar(pct: number, width: number): string {
 // ponytail: only a real end-of-file counts as finished. Stopping early (or
 // closing pi) has to stay "in progress", or the episode vanishes from
 // Continue listening without ever being heard.
-function finishStatus(): 2 | 3 {
-  if (endReason === "eof") return 3;
-  const dur = nowPlaying?.duration ?? 0;
-  if (dur > 0 && currentPosition >= dur - 5) return 3;
+// Pure: takes state as args so the harness can drive it directly.
+function finishStatus(endReasonArg: string | null, currentPositionArg: number, nowPlayingArg: Episode | null): 2 | 3 {
+  if (endReasonArg === "eof") return 3;
+  const dur = nowPlayingArg?.duration ?? 0;
+  if (dur > 0 && currentPositionArg >= dur - 5) return 3;
   return 2;
 }
 
@@ -542,7 +543,7 @@ async function play(episode: Episode, ctx: ExtensionContext, startPos?: number):
 
   player.on("exit", () => {
     // Flush position; only a real EOF marks the episode played
-    flushPosition(finishStatus());
+    flushPosition(finishStatus(endReason, currentPosition, nowPlaying));
     player = null;
     mpvSocket = null;
     clearWidget(ctx);
@@ -764,9 +765,11 @@ function repaintWidget(): void {
   widgetTui?.requestRender();
 }
 
-function widgetText(ep: Episode, renderWidth: number): string {
-  const pctVal = listeningPct(currentPosition, ep.duration);
-  const ico = isPaused ? "⏸" : "▶";
+// ponytail: pure — takes position/pause as args so the harness can drive it.
+// showWidget re-reads module state at render time and passes them in.
+function widgetText(ep: Episode, renderWidth: number, currentPositionArg: number, isPausedArg: boolean): string {
+  const pctVal = listeningPct(currentPositionArg, ep.duration);
+  const ico = isPausedArg ? "⏸" : "▶";
   // Fixed-width bar; truncate the label so the whole line fits the terminal.
   const barWidth = 20;
   // "🎙 " + "  [" + "]" + " XX%" + "  ▶" ≈ 14 chars of overhead
@@ -790,7 +793,7 @@ function showWidget(ctx: ExtensionContext, ep: Episode) {
         render: (width: number) => {
           // Fresh Text each render — currentPosition is read from module state,
           // so every redraw reflects the latest position.
-          return new Text(theme.fg("accent", widgetText(ep, width)), 0, 0).render(width);
+          return new Text(theme.fg("accent", widgetText(ep, width, currentPosition, isPaused)), 0, 0).render(width);
         },
         invalidate: () => {},
       };
@@ -1214,3 +1217,10 @@ export default function (pi: ExtensionAPI) {
 }
 
 // Self-check: run node podcast-check.ts to verify Pocket Casts public API.
+
+// ── test exports ───────────────────────────────────────────────────────────
+// ponytail: pure helpers and the picker, exported for the harness in tests/.
+// Behavior of these in production is unchanged — they are pure functions
+// here, but the harness can also drive widgetText/finishStatus directly
+// after the widgetText/finishStatus refactor that took module state as args.
+export { formatTime, listeningPct, progressBar, widgetText, pickFromList, finishStatus };
