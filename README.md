@@ -78,7 +78,7 @@ A progress bar widget appears above the editor while something is playing. Posit
 ## Platform notes
 
 - **Windows** — verified. mpv IPC uses named pipes (`\\.\pipe\mpv-podcast-<pid>-<ts>`) because the common Windows mpv builds ship without TCP IPC. The mpv binary is auto-discovered from `PATH`, winget, `Program Files`, and similar locations.
-- **Linux** — verified. TCP IPC on `127.0.0.1` with an OS-assigned port. mpv must be on `PATH` (no extra install paths checked).
+- **Linux** — verified. mpv IPC uses a unix domain socket, because mpv has no TCP IPC; the socket lives in `$XDG_RUNTIME_DIR` (or `/tmp`) and is removed on stop. mpv must be on `PATH` (no extra install paths checked).
 - **macOS** — best-effort on the same Unix code path as Linux. Not verified by the maintainer because no Apple hardware is available.
 
 ## Known limitations

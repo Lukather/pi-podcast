@@ -380,11 +380,12 @@ async function getPodcastEpisodes(
 }
 
 // ── mpv player ──────────────────────────────────────────────────────────────
-// ponytail: mpv only, no ffplay. Windows → named pipes, Unix → TCP IPC.
+// ponytail: mpv only, no ffplay. Windows → named pipes, Unix → unix sockets
+// (mpv's --input-ipc-server takes a socket path; it has no TCP IPC on any platform).
 
 let player: ChildProcess | null = null;
 let mpvSocket: net.Socket | null = null;
-let mpvIpcAddr = ""; // TCP port or named-pipe path
+let mpvIpcAddr = ""; // unix socket path or named-pipe path
 let nowPlaying: Episode | null = null;
 let isPaused = false;
 let currentPosition = 0; // seconds, updated by IPC poll
@@ -422,20 +423,20 @@ function findMpv(): string | null {
   return null;
 }
 
-// ponytail: unique named pipe per session (Windows only — Unix uses TCP)
+// ponytail: unique address per session. Windows mpv builds ship without unix
+// sockets, and mpv has no TCP IPC, so each platform gets the one transport it
+// actually supports.
 function ipcAddr(): string {
-  return `\\\\.\\pipe\\mpv-podcast-${process.pid}-${Date.now()}`;
+  if (IS_WINDOWS) return `\\\\.\\pipe\\mpv-podcast-${process.pid}-${Date.now()}`;
+  const dir = process.env.XDG_RUNTIME_DIR || "/tmp";
+  return path.join(dir, `mpv-podcast-${process.pid}-${Date.now()}.sock`);
 }
 
-function findFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.listen(0, "127.0.0.1", () => {
-      const port = (server.address() as net.AddressInfo).port;
-      server.close(() => resolve(port));
-    });
-    server.on("error", reject);
-  });
+// mpv does not unlink the socket it creates; without this, one file per play
+// piles up in $XDG_RUNTIME_DIR or /tmp.
+function unlinkIpcSocket(): void {
+  if (IS_WINDOWS || !mpvIpcAddr.startsWith("/")) return;
+  try { fs.unlinkSync(mpvIpcAddr); } catch { /* already gone */ }
 }
 
 function mpvIpc(command: any): Promise<any> {
@@ -509,17 +510,7 @@ async function play(episode: Episode, ctx: ExtensionContext, startPos?: number):
 
   stop(); // kill any existing player
 
-  if (IS_WINDOWS) {
-    mpvIpcAddr = ipcAddr();
-  } else {
-    try {
-      const port = await findFreePort();
-      mpvIpcAddr = `tcp://127.0.0.1:${port}`;
-    } catch {
-      ctx.ui.notify("Couldn't find a free port for mpv IPC.", "error");
-      return false;
-    }
-  }
+  mpvIpcAddr = ipcAddr();
 
   // Resolve the actual audio stream URL
   let streamUrl = episode.url;
@@ -568,6 +559,7 @@ async function play(episode: Episode, ctx: ExtensionContext, startPos?: number):
     flushPosition(finishStatus(endReason, currentPosition, nowPlaying));
     player = null;
     mpvSocket = null;
+    unlinkIpcSocket();
     clearWidget(ctx);
     nowPlaying = null;
   });
@@ -588,13 +580,8 @@ async function play(episode: Episode, ctx: ExtensionContext, startPos?: number):
         3000,
       );
       const connected = () => { clearTimeout(timer); resolve(); };
-      if (IS_WINDOWS) {
-        // named pipe — connect with path, not port
-        (mpvSocket! as any).connect(mpvIpcAddr, connected);
-      } else {
-        const port = parseInt(mpvIpcAddr.split(":").pop()!, 10);
-        mpvSocket!.connect(port, "127.0.0.1", connected);
-      }
+      // both platforms connect by path: named pipe on Windows, unix socket on Unix
+      (mpvSocket! as any).connect(mpvIpcAddr, connected);
       // listener stays attached: later socket errors stay handled
       mpvSocket!.on("error", (err) => { clearTimeout(timer); reject(err); });
     });
@@ -712,6 +699,8 @@ function stop() {
     mpvSocket.destroy();
     mpvSocket = null;
   }
+
+  unlinkIpcSocket();
 
   // ponytail: capture the process this timer is armed for. Reading the
   // module-level `player` here killed the *next* episode's mpv, because
