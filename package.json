@@ -1,6 +1,6 @@
 {
   "name": "pi-podcast",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Pocket Casts podcast player for pi — browse subscriptions, search, and play episodes in mpv.",
   "author": "Lorenzo Strambi <mail@lukather.net>",
   "license": "MIT",
