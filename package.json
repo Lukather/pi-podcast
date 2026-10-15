@@ -1,17 +1,24 @@
 {
   "name": "pi-podcast",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pocket Casts podcast player for pi — browse subscriptions, search, and play episodes in mpv.",
   "author": "Lorenzo Strambi <mail@lukather.net>",
   "license": "MIT",
-  "keywords": ["pi-package", "podcast", "pocket-casts", "mpv"],
+  "keywords": [
+    "pi-package",
+    "podcast",
+    "pocket-casts",
+    "mpv"
+  ],
   "type": "module",
   "scripts": {
     "test": "node --import ./tests/harness.ts --test tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "pi": {
-    "extensions": ["./podcast.ts"]
+    "extensions": [
+      "./podcast.ts"
+    ]
   },
   "files": [
     "podcast.ts",
